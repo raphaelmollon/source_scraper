@@ -1,0 +1,5 @@
+# Paramètres Claude Code locaux (spécifiques à la machine, non partagés)
+.claude/settings.local.json
+
+# Archives produites par l'outil / artefacts de test
+*.zip
