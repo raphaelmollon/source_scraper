@@ -25,7 +25,7 @@ projet/
 
 | Version | Dépendances |
 |---|---|
-| `.ps1` | PowerShell 5.1+ (cmdlet `Compress-Archive` natif) |
+| `.ps1` | PowerShell 5.1+ (`System.IO.Compression`, natif .NET) |
 | `.sh`  | `bash`, `find`, `mktemp`, `zip`, `realpath` ou `readlink -f` |
 
 ## Syntaxe
@@ -133,7 +133,7 @@ Le timestamp est au format `yyyyMMdd_HHmmss`. Le ZIP est créé dans le réperto
 ## Notes
 
 - Le filtrage par extension est insensible à la casse (`.H` matche `h`).
-- Les dossiers de staging temporaires sont systématiquement nettoyés (même en cas d'erreur).
+- `.ps1` : l'archive est écrite directement depuis les sources (pas de staging dans `%TEMP%`, donc pas de dépassement MAX_PATH) ; une archive partielle est supprimée en cas d'erreur. `.sh` : le staging temporaire est systématiquement nettoyé.
 - Les chemins absolus sont résolus via `Resolve-Path` (PS) / `realpath` ou `readlink -f` (SH).
 - Si un ZIP du même nom existe déjà, il est écrasé.
 - Les deux versions sont fonctionnellement équivalentes ; la seule différence pratique est le niveau de compression (`Optimal` côté .NET vs niveau 6 par défaut côté `zip`).

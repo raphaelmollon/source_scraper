@@ -186,16 +186,15 @@ elseif (-not $OutputName.EndsWith('.zip', [System.StringComparison]::OrdinalIgno
 }
 
 $zipPath = Join-Path -Path $executionDirectory -ChildPath $OutputName
-$stagingRoot = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath ([System.Guid]::NewGuid().ToString())
 
-# Plan de placement de chaque source dans le staging
-# Chaque entree: @{ Source = chemin absolu source; StagingRel = chemin relatif sous staging }
+# Plan de placement de chaque source dans l'archive
+# Chaque entree: @{ Source = chemin absolu source; ArchiveRel = chemin relatif dans l'archive }
 $sourcePlan = @()
 
 if ($resolvedSources.Count -eq 1) {
     $sourcePlan += @{
         Source     = $resolvedSources[0]
-        StagingRel = (Split-Path -Path $resolvedSources[0] -Leaf)
+        ArchiveRel = (Split-Path -Path $resolvedSources[0] -Leaf)
     }
 }
 elseif ($commonParent) {
@@ -204,7 +203,7 @@ elseif ($commonParent) {
         $relFromCommon = $src.Substring($commonParent.Length).TrimStart('\', '/')
         $sourcePlan += @{
             Source     = $src
-            StagingRel = (Join-Path -Path $commonLeaf -ChildPath $relFromCommon)
+            ArchiveRel = (Join-Path -Path $commonLeaf -ChildPath $relFromCommon)
         }
     }
 }
@@ -217,75 +216,69 @@ else {
             throw "Collision de noms : deux sources ont la meme feuille '$leaf'. Specifiez un parent commun ou renommez."
         }
         $usedLeaves[$key] = $true
-        $sourcePlan += @{ Source = $src; StagingRel = $leaf }
+        $sourcePlan += @{ Source = $src; ArchiveRel = $leaf }
     }
 }
 
-# Top-level dirs du staging (les racines de l'archive)
-$stagingTops = @($sourcePlan | ForEach-Object {
-        $top = ($_.StagingRel -split '[\\/]')[0]
-        Join-Path -Path $stagingRoot -ChildPath $top
-    } | Select-Object -Unique)
+# L'archive est ecrite directement depuis les sources (pas de copie dans %TEMP%) :
+# evite de depasser MAX_PATH (260) quand le dossier temporaire allonge les chemins.
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 
+$sourceList = ($resolvedSources -join "', '")
+Write-Status "Preparation de l'export depuis '$sourceList'."
+
+Write-Status "Analyse recursive des fichiers..."
+$allMatching = @()
+foreach ($entry in $sourcePlan) {
+    $files = Get-ChildItem -LiteralPath $entry.Source -Recurse -File
+    $matching = @($files | Where-Object { $normalizedExtensions -contains $_.Extension.ToLowerInvariant() })
+    foreach ($f in $matching) {
+        $allMatching += @{
+            File       = $f
+            SourceRoot = $entry.Source
+            ArchiveRel = $entry.ArchiveRel
+        }
+    }
+}
+
+if ($allMatching.Count -eq 0) {
+    Write-Status "Aucun fichier correspondant aux extensions demandees n'a ete trouve."
+    Write-Status "Aucune archive ZIP n'a ete cree."
+    return
+}
+
+Write-Status ("{0} fichier(s) a ajouter." -f $allMatching.Count)
+
+if (Test-Path -LiteralPath $zipPath) {
+    Remove-Item -LiteralPath $zipPath -Force
+}
+
+Write-Status "Creation de l'archive ZIP..."
+$zipCompleted = $false
+$zip = [System.IO.Compression.ZipFile]::Open($zipPath, [System.IO.Compression.ZipArchiveMode]::Create)
 try {
-    $sourceList = ($resolvedSources -join "', '")
-    Write-Status "Preparation de l'export depuis '$sourceList'."
-    New-Item -ItemType Directory -Path $stagingRoot -Force | Out-Null
-
-    Write-Status "Analyse recursive des fichiers..."
-    $allMatching = @()
-    foreach ($entry in $sourcePlan) {
-        $files = Get-ChildItem -LiteralPath $entry.Source -Recurse -File
-        $matching = @($files | Where-Object { $normalizedExtensions -contains $_.Extension.ToLowerInvariant() })
-        foreach ($f in $matching) {
-            $allMatching += @{
-                File       = $f
-                SourceRoot = $entry.Source
-                StagingRel = $entry.StagingRel
-            }
-        }
-    }
-
-    if ($allMatching.Count -eq 0) {
-        Write-Status "Aucun fichier correspondant aux extensions demandees n'a ete trouve."
-        Write-Status "Aucune archive ZIP n'a ete cree."
-        return
-    }
-
-    Write-Status ("{0} fichier(s) a copier." -f $allMatching.Count)
-
-    $copiedCount = 0
+    $addedCount = 0
     foreach ($item in $allMatching) {
-        $copiedCount++
+        $addedCount++
         $relativePath = $item.File.FullName.Substring($item.SourceRoot.Length).TrimStart('\', '/')
-        $destinationPath = Join-Path -Path $stagingRoot -ChildPath (Join-Path -Path $item.StagingRel -ChildPath $relativePath)
-        $destinationDirectory = Split-Path -Path $destinationPath -Parent
+        $entryName = (Join-Path -Path $item.ArchiveRel -ChildPath $relativePath) -replace '\\', '/'
 
-        $percentComplete = [math]::Floor(($copiedCount / $allMatching.Count) * 100)
-        $progressLabel = Join-Path -Path $item.StagingRel -ChildPath $relativePath
-        Write-Progress -Activity "Copie des fichiers" -Status $progressLabel -PercentComplete $percentComplete
+        $percentComplete = [math]::Floor(($addedCount / $allMatching.Count) * 100)
+        Write-Progress -Activity "Ajout des fichiers a l'archive" -Status $entryName -PercentComplete $percentComplete
 
-        if (-not (Test-Path -LiteralPath $destinationDirectory)) {
-            New-Item -ItemType Directory -Path $destinationDirectory -Force | Out-Null
-        }
-
-        Copy-Item -LiteralPath $item.File.FullName -Destination $destinationPath -Force
+        [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+            $zip, $item.File.FullName, $entryName, [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
     }
-
-    Write-Progress -Activity "Copie des fichiers" -Completed
-    Write-Status ("Copie terminee : {0} fichier(s) exporte(s)." -f $allMatching.Count)
-
-    if (Test-Path -LiteralPath $zipPath) {
-        Remove-Item -LiteralPath $zipPath -Force
-    }
-
-    Write-Status "Creation de l'archive ZIP..."
-    Compress-Archive -Path $stagingTops -DestinationPath $zipPath -CompressionLevel Optimal
-    Write-Status "Archive creee."
-    Write-Output $zipPath
+    $zipCompleted = $true
 }
 finally {
-    if (Test-Path -LiteralPath $stagingRoot) {
-        Remove-Item -LiteralPath $stagingRoot -Recurse -Force
+    $zip.Dispose()
+    Write-Progress -Activity "Ajout des fichiers a l'archive" -Completed
+    if (-not $zipCompleted -and (Test-Path -LiteralPath $zipPath)) {
+        Remove-Item -LiteralPath $zipPath -Force
     }
 }
+
+Write-Status ("Archive creee : {0} fichier(s) exporte(s)." -f $allMatching.Count)
+Write-Output $zipPath
